@@ -1,0 +1,90 @@
+name: CI Runner Pipeline
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-run:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - name: Environment Setup
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy Unrestricted -Scope Process -Force
+          Write-Output "Initializing environment..."
+
+      - name: Configure RDP User
+        shell: pwsh
+        env:
+          RDP_PASS: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $User = "rwa"
+          $Password = ConvertTo-SecureString $env:RDP_PASS -AsPlainText -Force
+          New-LocalUser $User -Password $Password -FullName "RDP User" -Description "RDP Admin User" -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $User
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $User
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          New-NetFirewallRule -DisplayName "Allow RDP 3389" -Direction Inbound -Protocol TCP -LocalPort 3389 -Action Allow -ErrorAction SilentlyContinue
+
+      - name: Connect Mesh Network
+        shell: pwsh
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          if ("$env:TS_KEY" -eq "") {
+            Write-Output "Tailscale key missing, skipping..."
+            exit 0
+          }
+
+          Write-Output "Installing tailscale..."
+          choco install tailscale -y
+          Start-Sleep -Seconds 5
+
+          Start-Service Tailscale -ErrorAction SilentlyContinue
+
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="$env:TS_KEY" --hostname="github-runner" --advertise-exit-node --unattended --accept-risk=lose-ssh
+
+          $ip = $null
+          for ($i = 0; $i -lt 20; $i++) {
+            $ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
+            if ($ip) { break }
+            Start-Sleep -Seconds 3
+          }
+
+          if ($ip) {
+            Write-Output "=================================="
+            Write-Output " Tailscale IP: $ip"
+            Write-Output " RDP -> $ip:3389  |  User: rwa"
+            Write-Output "=================================="
+          } else {
+            Write-Error "Tailscale IP نگرفت - اتصال برقرار نشد."
+            exit 1
+          }
+
+      - name: Configure Storage Engine
+        shell: pwsh
+        env:
+          RCLONE_DATA: ${{ secrets.RCLONE_CONFIG_DATA }}
+        run: |
+          if ("$env:RCLONE_DATA" -ne "") {
+            Write-Output "Setting up rclone..."
+            choco install rclone -y
+            $configPath = "$env:APPDATA\rclone"
+            if (!(Test-Path $configPath)) { New-Item -Path $configPath -ItemType Directory -Force }
+            [System.IO.File]::WriteAllText("$configPath\rclone.conf", $env:RCLONE_DATA)
+          } else {
+            Write-Output "Storage config missing, skipping..."
+          }
+
+      - name: Keep Alive Loop
+        shell: pwsh
+        run: |
+          $timeout = 350
+          $elapsed = 0
+          while ($elapsed -lt $timeout) {
+            Write-Output "Session active... ($elapsed mins)"
+            Start-Sleep -Seconds 60
+            $elapsed++
+          }
