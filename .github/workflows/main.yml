@@ -1,72 +1,45 @@
-name: CI Runner2
+name: 🐧 Linux Desktop (Web VNC) + Onboard
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 */5 * * *'
 
 jobs:
   build-and-run:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     steps:
-      - name: Environment Setup
+      - name: Install Desktop, noVNC & Onboard
         run: |
-          Set-ExecutionPolicy Unrestricted -Scope Process -Force
-          Write-Output "Initializing environment..."
-
-      - name: Configure RDP User
-        run: |
-          $User = "rwa"
-          $PasswordText = "Q350607p@"
+          sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y xfce4 xfce4-goodies tightvncserver novnc websockify onboard
           
-          # ساخت یا آپدیت یوزر با پسورد صحیح
-          $ExistingUser = Get-LocalUser -Name $User -ErrorAction SilentlyContinue
-          if ($null -eq $ExistingUser) {
-              $SecurePassword = ConvertTo-SecureString $PasswordText -AsPlainText -Force
-              New-LocalUser $User -Password $SecurePassword -FullName "RDP User" -Description "RDP Admin User"
-          } else {
-              Set-LocalUser -Name $User -Password (ConvertTo-SecureString $PasswordText -AsPlainText -Force)
-          }
-
-          # عضویت در گروه‌های دسترسی ریموت و ادمین
-          Add-LocalGroupMember -Group "Administrators" -Member $User -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $User -ErrorAction SilentlyContinue
-
-          # غیرفعال کردن Network Level Authentication (NLA) برای پذیرش بی‌دردسر پسورد
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+          mkdir -p ~/.vnc
+          echo "123456" | vncpasswd -f > ~/.vnc/passwd
+          chmod 600 ~/.vnc/passwd
           
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Write-Output "RDP User configured successfully with correct password!"
+          cat << 'EOF' > ~/.vnc/xstartup
+          #!/bin/bash
+          xrdb $HOME/.Xresources
+          startxfce4 &
+          onboard &
+          EOF
+          chmod +x ~/.vnc/xstartup
 
-      - name: Connect Mesh Network
+          vncserver :1 -geometry 1280x720 -depth 24
+          websockify --web /usr/share/novnc/ 6080 localhost:5901 &
+
+      - name: Connect Tailscale
         env:
           TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          if ("$env:TS_KEY" -ne "") {
-            echo "Installing tailscale..."
-            choco install tailscale -y
-
-            # Enable IP Routing in Registry
-            Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' -Name 'IPEnableRouter' -Value 1
-
-            # Enable & Start RemoteAccess / Routing Service
-            Set-Service -Name RemoteAccess -StartupType Automatic
-            Start-Service -Name RemoteAccess -ErrorAction SilentlyContinue
-
-            # Connect Tailscale with explicit hostname and exit-node flag
-            & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="$env:TS_KEY" --hostname="github-runner" --advertise-exit-node --unattended
-            Start-Sleep -Seconds 10
-          } else {
-            echo "Tailscale key missing, skipping..."
-          }
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey "$TS_KEY" --hostname "github-runner-linux" --advertise-exit-node --accept-routes
+          sleep 5
 
       - name: Keep Alive Loop
         run: |
-          $timeout = 290
-          $elapsed = 0
-          while ($elapsed -lt $timeout) {
-            Write-Output "Session active... ($elapsed mins)"
-            Start-Sleep -Seconds 60
-            $elapsed++
-          }
+          timeout=290
+          elapsed=0
+          while [ $elapsed -lt $timeout ]; do
+            sleep 60
+            elapsed=$((elapsed + 1))
+          done
